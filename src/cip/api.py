@@ -3,6 +3,7 @@ API HTTP de la plataforma.
 
 Endpoints (Sprint 1):
   GET /health              -> healthcheck (lo usa Docker y luego Kubernetes)
+  GET /health/ready        -> readiness con conectividad DB
   GET /papers              -> lista paginada
   GET /papers/{pmid}       -> un paper por PMID
   GET /papers/search?q=... -> búsqueda full-text simple
@@ -19,16 +20,16 @@ Decisiones:
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import desc, func, or_, select
+from sqlalchemy import desc, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from cip.config import get_settings
 from cip.db import IngestRun, Paper, get_session
 from cip.logging_setup import configure_logging, get_logger
 from cip.storage import ObjectStorage
@@ -57,7 +58,7 @@ class PaperRead(BaseModel):
     updated_at: datetime
 
     @classmethod
-    def from_orm_paper(cls, p: Paper) -> "PaperRead":
+    def from_orm_paper(cls, p: Paper) -> PaperRead:
         """Convierte el modelo ORM (con authors/mesh como string) a la DTO."""
         return cls(
             pmid=p.pmid,
@@ -101,11 +102,24 @@ class HealthResponse(BaseModel):
     version: str
 
 
+class ReadinessResponse(BaseModel):
+    status: str
+    version: str
+    database: str
+
+
+class RawXmlLocation(BaseModel):
+    pmid: str
+    s3_bucket: str
+    s3_key: str
+    presigned_url: str
+
+
 # ============================================================
 # App
 # ============================================================
 @asynccontextmanager
-async def lifespan(app: FastAPI):  # noqa: ARG001
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Lifespan handler: startup/shutdown."""
     configure_logging()
     log.info("api_starting", version="0.1.0")
@@ -128,6 +142,20 @@ app = FastAPI(
 async def health() -> HealthResponse:
     """Healthcheck. Devuelve 200 si el proceso está vivo."""
     return HealthResponse(version="0.1.0")
+
+
+@app.get("/health/ready", response_model=ReadinessResponse, tags=["meta"])
+async def health_ready(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> ReadinessResponse:
+    """Readiness check: valida que la API puede hablar con Postgres."""
+    try:
+        await session.execute(text("SELECT 1"))
+    except Exception as exc:
+        log.warning("readiness_check_failed", error=str(exc))
+        raise HTTPException(status_code=503, detail="Database not ready") from exc
+
+    return ReadinessResponse(status="ok", version="0.1.0", database="ok")
 
 
 @app.get("/papers", response_model=PaperListResponse, tags=["papers"])
@@ -213,26 +241,23 @@ async def get_paper(
     return PaperRead.from_orm_paper(paper)
 
 
-@app.get("/papers/{pmid}/raw", tags=["papers"])
+@app.get("/papers/{pmid}/raw", response_model=RawXmlLocation, tags=["papers"])
 async def get_paper_raw(
     pmid: str,
     session: Annotated[AsyncSession, Depends(get_session)],
-) -> dict[str, str]:
+) -> RawXmlLocation:
     """Devuelve metadata para descargar el XML crudo de S3."""
     paper = await session.get(Paper, pmid)
     if paper is None or paper.raw_s3_key is None:
         raise HTTPException(status_code=404, detail="Raw XML not found for this PMID")
 
-    settings = get_settings()
-    return {
-        "pmid": pmid,
-        "s3_bucket": settings.s3_bucket,
-        "s3_key": paper.raw_s3_key,
-        "console_url": (
-            f"http://localhost:9001/browser/{settings.s3_bucket}/"
-            f"{paper.raw_s3_key.replace('/', '%2F')}"
-        ),
-    }
+    storage = ObjectStorage()
+    return RawXmlLocation(
+        pmid=pmid,
+        s3_bucket=storage.bucket,
+        s3_key=paper.raw_s3_key,
+        presigned_url=storage.presigned_get_url(paper.raw_s3_key),
+    )
 
 
 @app.get("/ingest-runs", response_model=list[IngestRunRead], tags=["ingest"])

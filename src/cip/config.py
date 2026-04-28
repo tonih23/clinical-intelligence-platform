@@ -11,7 +11,6 @@ y no a las 3 AM con alarmas.
 
 from functools import lru_cache
 
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 

@@ -65,7 +65,7 @@ Pasos:
 git clone https://github.com/<tu-usuario>/clinical-intelligence-platform.git
 cd clinical-intelligence-platform
 
-# 2. Copia el .env de ejemplo
+# 2. Opcional: copia el .env de ejemplo si quieres personalizar credenciales o PubMed
 cp .env.example .env
 
 # 3. Levanta toda la infra (postgres + minio + api)
@@ -79,6 +79,7 @@ docker compose exec api python -m cip.ingest --query "complement system" --max-r
 
 # 6. Comprueba la API
 curl http://localhost:8000/health
+curl http://localhost:8000/health/ready
 curl http://localhost:8000/papers?limit=5
 curl http://localhost:8000/papers/search?q=complement
 ```
@@ -87,6 +88,18 @@ Interfaces web:
 
 - API docs (Swagger): http://localhost:8000/docs
 - MinIO console: http://localhost:9001 (user: `minioadmin`, pass: `minioadmin`)
+- MinIO S3 API desde el host: http://localhost:9002
+
+Comandos de calidad dentro del contenedor API:
+
+```bash
+docker compose exec api pytest -v
+docker compose exec api ruff check src tests
+docker compose exec api mypy src
+```
+
+El endpoint `GET /papers/{pmid}/raw` devuelve bucket, key y una URL temporal
+pre-firmada para descargar el XML crudo desde MinIO/S3.
 
 ## Estructura del repo
 

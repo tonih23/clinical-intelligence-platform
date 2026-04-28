@@ -34,9 +34,8 @@ jobs:
         run: |
           source .venv/bin/activate
           mypy src
-        continue-on-error: true   # warning-only en Sprint 1; estricto desde Sprint 5
 
       - name: Run tests
         run: |
           source .venv/bin/activate
-          pytest -v --cov=cip --cov-report=term
+          pytest -v

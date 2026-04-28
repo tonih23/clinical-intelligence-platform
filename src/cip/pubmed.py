@@ -16,7 +16,7 @@ Buenas prácticas:
   - Identifícate con tool y email (los rate limits y bans se aplican por user-agent).
   - Procesa los PMIDs en lotes de 200 (PubMed soporta hasta ~10k pero los lotes de 200
     son el sweet-spot para fiabilidad y memoria).
-  - Implementa retries exponenciales en errores transitorios (504, 429).
+  - Implementa retries exponenciales en errores transitorios (408, 429, 5xx).
 
 Lo que aprendes aquí: cómo se integran APIs externas en serio, no con
 requests.get sin manejo de nada.
@@ -25,9 +25,10 @@ requests.get sin manejo de nada.
 from __future__ import annotations
 
 import asyncio
-import xml.etree.ElementTree as ET  # noqa: N817 — alias estándar
+import xml.etree.ElementTree as ET
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import cast
 
 import httpx
 
@@ -39,6 +40,7 @@ log = get_logger(__name__)
 EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 ESEARCH_URL = f"{EUTILS_BASE}/esearch.fcgi"
 EFETCH_URL = f"{EUTILS_BASE}/efetch.fcgi"
+TRANSIENT_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 
 @dataclass(slots=True)
@@ -96,7 +98,7 @@ class PubMedClient:
         for attempt in range(self.max_retries):
             try:
                 resp = await self._client.get(url, params=params)
-                if resp.status_code in (429, 500, 502, 503, 504):
+                if resp.status_code in TRANSIENT_HTTP_STATUS_CODES:
                     raise httpx.HTTPStatusError(
                         f"transient {resp.status_code}",
                         request=resp.request,
@@ -104,7 +106,12 @@ class PubMedClient:
                     )
                 resp.raise_for_status()
                 return resp
-            except (httpx.HTTPError, httpx.RequestError) as exc:
+            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.TransportError) as exc:
+                if isinstance(exc, httpx.HTTPStatusError) and (
+                    exc.response.status_code not in TRANSIENT_HTTP_STATUS_CODES
+                ):
+                    raise
+
                 last_exc = exc
                 wait = 2**attempt
                 log.warning(
@@ -202,14 +209,23 @@ def _parse_pubmed_xml(xml_bytes: bytes) -> list[PubMedPaper]:
 
     for article in root.findall(".//PubmedArticle"):
         try:
-            paper = _parse_single_article(article, xml_bytes)
+            article_xml = _raw_xml_for_article(article)
+            paper = _parse_single_article(article, article_xml)
             if paper is not None:
                 papers.append(paper)
-        except Exception as exc:  # noqa: BLE001 — un paper roto no debe parar el batch
+        except Exception as exc:
             log.warning("pubmed_parse_error", error=str(exc))
             continue
 
     return papers
+
+
+def _raw_xml_for_article(article: ET.Element) -> bytes:
+    """Serializa un artículo individual como XML válido y autocontenido."""
+    article_xml = cast(bytes, ET.tostring(article, encoding="utf-8"))
+    return b'<?xml version="1.0" encoding="utf-8"?>\n<PubmedArticleSet>' + article_xml + (
+        b"</PubmedArticleSet>"
+    )
 
 
 def _parse_single_article(article: ET.Element, raw_xml: bytes) -> PubMedPaper | None:
@@ -222,9 +238,10 @@ def _parse_single_article(article: ET.Element, raw_xml: bytes) -> PubMedPaper | 
     title = _text_of(title_el) or "(no title)"
 
     # Abstract puede tener varios <AbstractText> con label="BACKGROUND", "METHODS", etc.
-    abstract_parts = [
-        _text_of(el) for el in article.findall(".//Article/Abstract/AbstractText") if _text_of(el)
-    ]
+    abstract_parts: list[str] = []
+    for el in article.findall(".//Article/Abstract/AbstractText"):
+        if text := _text_of(el):
+            abstract_parts.append(text)
     abstract = "\n\n".join(abstract_parts) if abstract_parts else None
 
     journal_el = article.find(".//Article/Journal/Title")
@@ -263,7 +280,7 @@ def _parse_single_article(article: ET.Element, raw_xml: bytes) -> PubMedPaper | 
         authors=authors,
         mesh_terms=[m for m in mesh_terms if m],
         doi=doi,
-        raw_xml=raw_xml,  # guardamos el XML completo del set, no solo de este paper
+        raw_xml=raw_xml,
     )
 
 

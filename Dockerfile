@@ -14,11 +14,13 @@ WORKDIR /app
 
 # Copia primero los archivos de dependencias para aprovechar la caché
 COPY pyproject.toml ./
+COPY README.md ./
 COPY src/ ./src/
 
-# Crea el entorno y instala
+# Crea el entorno e instala dependencias.
+# TODO: separar imágenes dev/prod cuando el proyecto deje de ser un portfolio de aprendizaje.
 RUN uv venv /opt/venv && \
-    uv pip install --python /opt/venv/bin/python -e .
+    uv pip install --python /opt/venv/bin/python -e ".[dev]"
 
 # ============================================================
 # Stage 2: runtime — imagen final delgada
@@ -39,7 +41,9 @@ WORKDIR /app
 # Copia el entorno virtual ya construido y el código
 COPY --from=builder --chown=cip:cip /opt/venv /opt/venv
 COPY --chown=cip:cip src/ ./src/
+COPY --chown=cip:cip tests/ ./tests/
 COPY --chown=cip:cip pyproject.toml ./
+COPY --chown=cip:cip README.md ./
 
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \

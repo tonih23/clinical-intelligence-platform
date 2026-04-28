@@ -55,10 +55,10 @@ cd ~/projects   # o donde tengas tus proyectos
 unzip clinical-intelligence-platform.zip
 cd clinical-intelligence-platform
 
-# Copiar el .env de ejemplo
+# Opcional: copiar el .env de ejemplo para personalizar credenciales o PubMed
 cp .env.example .env
 
-# Editar el .env
+# Editar el .env si lo has creado
 # (usa nano, vim, VS Code... lo que tengas)
 nano .env
 ```
@@ -70,7 +70,8 @@ PUBMED_API_KEY=tu_key_aqui
 PUBMED_EMAIL=toni@example.com
 ```
 
-Si no quieres pedir la key ahora, déjala vacía. Funciona igual, solo más lento.
+Si no quieres pedir la key ahora, puedes no crear `.env` o dejarla vacía.
+Docker Compose y la app usan valores locales por defecto; `.env.example` es la plantilla documentada.
 
 ## 4. Levantar la infraestructura
 
@@ -132,6 +133,13 @@ curl http://localhost:8000/health
 # {"status":"ok","version":"0.1.0"}
 ```
 
+### Readiness con Postgres
+
+```bash
+curl http://localhost:8000/health/ready
+# {"status":"ok","version":"0.1.0","database":"ok"}
+```
+
 ### Listar los primeros papers
 
 ```bash
@@ -152,6 +160,15 @@ Abre en el navegador: **http://localhost:8000/docs**
 
 Abre **http://localhost:9001** — usuario `minioadmin`, password `minioadmin`.
 En el bucket `pubmed-raw` verás los XML organizados por shard.
+La API S3 de MinIO queda expuesta en el host en **http://localhost:9002**.
+
+También puedes pedir la ubicación del XML crudo desde la API:
+
+```bash
+curl 'http://localhost:8000/papers/<PMID>/raw' | python -m json.tool
+```
+
+La respuesta incluye `pmid`, `s3_bucket`, `s3_key` y `presigned_url`.
 
 ### Consola de Postgres
 
@@ -202,9 +219,11 @@ git ls-files | grep -E '\.env$'   # debe estar vacío
 
 ```bash
 docker compose exec api pytest -v
+docker compose exec api ruff check src tests
+docker compose exec api mypy src
 ```
 
-Deberías ver 6 tests verdes.
+Deberías ver los tests verdes y los checks sin errores.
 
 ## 10. Apagar
 

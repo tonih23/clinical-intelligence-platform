@@ -12,6 +12,8 @@ Alternativas:
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import boto3
 from botocore.client import Config
 from botocore.exceptions import ClientError
@@ -54,7 +56,12 @@ class ObjectStorage:
             else:
                 raise
 
-    def put_object(self, key: str, body: bytes, content_type: str = "application/octet-stream") -> str:
+    def put_object(
+        self,
+        key: str,
+        body: bytes,
+        content_type: str = "application/octet-stream",
+    ) -> str:
         """Sube un objeto y devuelve la key."""
         self.client.put_object(
             Bucket=self.bucket,
@@ -67,12 +74,25 @@ class ObjectStorage:
 
     def get_object(self, key: str) -> bytes:
         """Descarga un objeto."""
-        resp = self.client.get_object(Bucket=self.bucket, Key=key)
-        return resp["Body"].read()
+        resp: dict[str, Any] = self.client.get_object(Bucket=self.bucket, Key=key)
+        return cast(bytes, resp["Body"].read())
 
     def object_exists(self, key: str) -> bool:
         try:
             self.client.head_object(Bucket=self.bucket, Key=key)
             return True
-        except ClientError:
-            return False
+        except ClientError as exc:
+            error_code = exc.response.get("Error", {}).get("Code")
+            http_status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            if error_code in ("404", "NoSuchKey", "NotFound") or http_status == 404:
+                return False
+            raise
+
+    def presigned_get_url(self, key: str, expires_seconds: int = 3600) -> str:
+        """Genera una URL temporal para descargar un objeto."""
+        url = self.client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self.bucket, "Key": key},
+            ExpiresIn=expires_seconds,
+        )
+        return cast(str, url)

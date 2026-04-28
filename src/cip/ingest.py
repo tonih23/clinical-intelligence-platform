@@ -53,7 +53,7 @@ async def _upsert_paper(session: AsyncSession, paper: PubMedPaper, raw_s3_key: s
     Usamos `INSERT ... ON CONFLICT DO UPDATE` (Postgres-specific) porque es
     atómico y mucho más eficiente que `SELECT then INSERT/UPDATE`.
     """
-    values = {
+    values: dict[str, str | int | None] = {
         "pmid": paper.pmid,
         "title": paper.title,
         "abstract": paper.abstract,
@@ -65,13 +65,18 @@ async def _upsert_paper(session: AsyncSession, paper: PubMedPaper, raw_s3_key: s
         "raw_s3_key": raw_s3_key,
     }
 
-    # Comprobamos si existía (para devolver insert vs update)
+    # Comprobamos si existía para reportar insert vs update. Es una métrica operativa
+    # ligera, no un contador atómico perfecto bajo escritores concurrentes.
     existed = await session.scalar(select(Paper.pmid).where(Paper.pmid == paper.pmid))
 
     stmt = pg_insert(Paper).values(**values)
+    update_values: dict[str, str | int | datetime | None] = {
+        k: v for k, v in values.items() if k != "pmid"
+    }
+    update_values["updated_at"] = datetime.now(UTC)
     stmt = stmt.on_conflict_do_update(
         index_elements=["pmid"],
-        set_={k: v for k, v in values.items() if k != "pmid"},
+        set_=update_values,
     )
     await session.execute(stmt)
     return existed is None
@@ -84,15 +89,14 @@ async def run_ingest(query: str, max_results: int) -> None:
     storage.ensure_bucket()
 
     inserted = updated = fetched = 0
-    run_id: int | None = None
 
     # 1. Crear el registro de run
     async with sessionmaker() as session:
-        run = IngestRun(query=query, max_results=max_results, status="running")
-        session.add(run)
+        ingest_run = IngestRun(query=query, max_results=max_results, status="running")
+        session.add(ingest_run)
         await session.commit()
-        await session.refresh(run)
-        run_id = run.id
+        await session.refresh(ingest_run)
+        run_id = ingest_run.id
         log.info("ingest_run_started", run_id=run_id, query=query, max_results=max_results)
 
     try:
@@ -137,13 +141,13 @@ async def run_ingest(query: str, max_results: int) -> None:
 
         # 4. Marcar la run como completada
         async with sessionmaker() as session:
-            run = await session.get(IngestRun, run_id)
-            if run is not None:
-                run.papers_fetched = fetched
-                run.papers_inserted = inserted
-                run.papers_updated = updated
-                run.status = "success"
-                run.finished_at = datetime.now(UTC)
+            completed_run = await session.get(IngestRun, run_id)
+            if completed_run is not None:
+                completed_run.papers_fetched = fetched
+                completed_run.papers_inserted = inserted
+                completed_run.papers_updated = updated
+                completed_run.status = "success"
+                completed_run.finished_at = datetime.now(UTC)
                 await session.commit()
 
         log.info(
@@ -157,11 +161,11 @@ async def run_ingest(query: str, max_results: int) -> None:
     except Exception as exc:
         log.exception("ingest_run_failed", run_id=run_id, error=str(exc))
         async with sessionmaker() as session:
-            run = await session.get(IngestRun, run_id)
-            if run is not None:
-                run.status = "failed"
-                run.error_message = str(exc)
-                run.finished_at = datetime.now(UTC)
+            failed_run = await session.get(IngestRun, run_id)
+            if failed_run is not None:
+                failed_run.status = "failed"
+                failed_run.error_message = str(exc)
+                failed_run.finished_at = datetime.now(UTC)
                 await session.commit()
         raise
 
